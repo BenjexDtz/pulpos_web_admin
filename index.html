@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Central | Radio Taxis Pulpos</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-white font-sans antialiased">
+
+    <nav class="bg-slate-800 p-4 border-b border-blue-500">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-2xl font-bold text-blue-400">📡 Central PULPOS</h1>
+            <span class="text-slate-400 text-sm">Panel de Administración - El Alto</span>
+        </div>
+    </nav>
+
+    <div class="container mx-auto mt-10 p-4">
+        
+        <div class="flex justify-between items-end mb-6">
+            <div>
+                <h2 class="text-3xl font-bold">Reporte de Flota</h2>
+                <p class="text-slate-400 mt-1">Resumen de ganancias y viajes sincronizados.</p>
+            </div>
+            <button onclick="cargarDatos()" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded font-bold transition">
+                🔄 Actualizar Datos
+            </button>
+        </div>
+
+        <div class="bg-slate-800 rounded-lg shadow-xl overflow-hidden border border-slate-700">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-slate-950 text-slate-300 uppercase text-sm border-b border-slate-700">
+                        <th class="p-4">Chofer</th>
+                        <th class="p-4 text-center">Placa</th>
+                        <th class="p-4 text-center">Total Viajes</th>
+                        <th class="p-4 text-right">Km Recorridos</th>
+                        <th class="p-4 text-right text-green-400">Recaudación (Bs)</th>
+                    </tr>
+                </thead>
+                <tbody id="tabla-body">
+                    <tr>
+                        <td colspan="5" class="p-8 text-center text-slate-500">
+                            Cargando datos desde el servidor...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // ⚠️ Usamos localhost porque estamos abriendo la web en la misma computadora que el servidor
+        const urlAPI = 'http://localhost:3000/api/viajes/reporte';
+
+        async function cargarDatos() {
+            const tbody = document.getElementById('tabla-body');
+            tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-slate-400">Consultando a la base de datos...</td></tr>';
+
+            try {
+                // Hacemos la llamada al servidor Node.js
+                const respuesta = await fetch(urlAPI);
+                const datos = await respuesta.json();
+
+                if (datos.estadisticas && datos.estadisticas.length > 0) {
+                    tbody.innerHTML = ''; // Limpiamos el mensaje de carga
+
+                    // Recorremos cada chofer y creamos una fila en la tabla
+                    datos.estadisticas.forEach(chofer => {
+                        const fila = `
+                            <tr class="border-b border-slate-700 hover:bg-slate-750 transition">
+                                <td class="p-4 font-semibold text-blue-300">${chofer.nombre_completo}</td>
+                                <td class="p-4 text-center">
+                                    <span class="bg-slate-900 px-2 py-1 rounded text-xs border border-slate-600">${chofer.placa_vehiculo}</span>
+                                </td>
+                                <td class="p-4 text-center font-bold">${chofer.total_viajes}</td>
+                                <td class="p-4 text-right text-slate-300">${chofer.kilometros_recorridos} km</td>
+                                <td class="p-4 text-right text-green-400 font-bold text-lg">Bs ${chofer.dinero_recaudado}</td>
+                            </tr>
+                        `;
+                        tbody.innerHTML += fila;
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-yellow-500">No hay viajes registrados.</td></tr>';
+                }
+            } catch (error) {
+                console.error(error);
+                tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-red-500">❌ Error al conectar con el servidor. ¿Está encendido Node.js?</td></tr>';
+            }
+        }
+
+        // Cargamos los datos apenas se abre la página
+        window.onload = cargarDatos;
+    </script>
+
+</body>
+</html>

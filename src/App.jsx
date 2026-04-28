@@ -1,50 +1,246 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
-import { Activity, Car, DollarSign, RefreshCw, Lock, User, Users, UserPlus, LayoutDashboard, Search, KeyRound, ToggleLeft, ToggleRight, ShieldCheck, ShieldOff } from 'lucide-react';
+import {
+  Activity, Car, DollarSign, RefreshCw, Lock, User, Users,
+  UserPlus, LayoutDashboard, Search, KeyRound, ToggleLeft,
+  ToggleRight, ShieldCheck, ShieldOff, Map, Radio, Wifi, WifiOff,
+  TrendingUp, Clock, AlertCircle, X, MapPin
+} from 'lucide-react';
 
+// ─── LEAFLET LOADER ──────────────────────────────────────────────────────────
+function useLeaflet() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (window.L) { setReady(true); return; }
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    document.head.appendChild(link);
+    const script = document.createElement('script');
+    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    script.onload = () => setReady(true);
+    document.head.appendChild(script);
+  }, []);
+  return ready;
+}
+
+const EL_ALTO_CENTER = [-16.5, -68.19];
+
+// ─── FLEET MAP COMPONENT ─────────────────────────────────────────────────────
+function FleetMap({ choferes, viajes }) {
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef([]);
+  const leafletReady = useLeaflet();
+
+  useEffect(() => {
+    if (!leafletReady || !mapRef.current) return;
+    if (mapInstanceRef.current) return;
+
+    const L = window.L;
+    const map = L.map(mapRef.current, { zoomControl: false }).setView(EL_ALTO_CENTER, 14);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '©OpenStreetMap ©CARTO', maxZoom: 19
+    }).addTo(map);
+
+    mapInstanceRef.current = map;
+    return () => {
+      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null; }
+    };
+  }, [leafletReady]);
+
+  useEffect(() => {
+    if (!leafletReady || !mapInstanceRef.current) return;
+    const L = window.L;
+    const map = mapInstanceRef.current;
+
+    markersRef.current.forEach(m => map.removeLayer(m));
+    markersRef.current = [];
+
+    // Solo mostrar conductores activos CON posición GPS real
+    const conPosicion = choferes.filter(
+      c => c.estado_activo && c.ultima_lat != null && c.ultima_lng != null
+    );
+
+    // Conductores activos SIN posición (no iniciaron viaje aún)
+    const sinPosicion = choferes.filter(
+      c => c.estado_activo && (c.ultima_lat == null || c.ultima_lng == null)
+    );
+
+    conPosicion.forEach(chofer => {
+      const pos = [parseFloat(chofer.ultima_lat), parseFloat(chofer.ultima_lng)];
+      const tripCount = viajes.filter(v => v.chofer === chofer.nombre_completo).length;
+      const total = viajes
+        .filter(v => v.chofer === chofer.nombre_completo)
+        .reduce((s, v) => s + parseFloat(v.tarifa_total || 0), 0);
+
+      // Calcular cuánto tiempo lleva sin actualizar
+      const ahora = new Date();
+      const ultima = chofer.ultima_actualizacion ? new Date(chofer.ultima_actualizacion) : null;
+      const minutos = ultima ? Math.floor((ahora - ultima) / 60000) : null;
+      const reciente = minutos !== null && minutos < 5;
+
+      const color = reciente ? '#10b981' : '#f59e0b'; // verde=activo, amarillo=inactivo >5min
+
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="
+          background: ${color}; border: 2px solid ${reciente ? '#34d399' : '#fcd34d'};
+          border-radius: 50%; width: 30px; height: 30px;
+          display: flex; align-items: center; justify-content: center;
+          box-shadow: 0 0 14px ${color}60; cursor: pointer;
+        ">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="white">
+            <rect x="1" y="3" width="15" height="13" rx="2"/>
+            <path d="M16 8h4l3 5v3h-7V8z"/>
+            <circle cx="5.5" cy="18.5" r="2.5"/>
+            <circle cx="18.5" cy="18.5" r="2.5"/>
+          </svg>
+        </div>`,
+        iconSize: [30, 30], iconAnchor: [15, 15]
+      });
+
+      const marker = L.marker(pos, { icon }).addTo(map).bindPopup(`
+        <div style="font-family: monospace; min-width: 200px; font-size: 12px;">
+          <div style="font-weight: bold; color: ${color}; margin-bottom: 4px; font-size: 13px;">
+            ${chofer.nombre_completo}
+          </div>
+          <div style="color: #888;">🚗 ${chofer.placa_vehiculo}</div>
+          <hr style="border-color: #eee; margin: 6px 0;"/>
+          <div>Viajes: <b>${tripCount}</b></div>
+          <div>Recaudado: <b style="color: #16a34a;">Bs ${total.toFixed(2)}</b></div>
+          ${minutos !== null
+            ? `<div style="margin-top: 4px; color: ${reciente ? '#16a34a' : '#d97706'};">
+                ⏱ Actualizado hace ${minutos} min
+               </div>`
+            : ''}
+          <div style="color: #999; font-size: 10px; margin-top: 4px;">
+            📍 ${parseFloat(chofer.ultima_lat).toFixed(5)}, ${parseFloat(chofer.ultima_lng).toFixed(5)}
+          </div>
+        </div>
+      `);
+
+      markersRef.current.push(marker);
+    });
+
+    // Si hay conductores activos sin posición, loguear en consola
+    if (sinPosicion.length > 0) {
+      console.info(`ℹ️ ${sinPosicion.length} conductor(es) activo(s) sin posición GPS aún.`);
+    }
+
+  }, [leafletReady, choferes, viajes]);
+
+  return (
+    <div className="relative h-full w-full">
+      <div ref={mapRef} style={{ height: '100%', width: '100%' }} />
+      {!leafletReady && (
+        <div className="absolute inset-0 bg-gray-900 flex items-center justify-center">
+          <div className="flex items-center space-x-3 text-green-400">
+            <RefreshCw className="w-5 h-5 animate-spin" />
+            <span className="font-mono text-sm">Inicializando radar...</span>
+          </div>
+        </div>
+      )}
+      {/* Leyenda */}
+      <div className="absolute top-3 left-3 bg-gray-900 bg-opacity-90 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono z-[1000] space-y-1">
+        <div className="flex items-center space-x-2 text-green-400">
+          <div className="w-3 h-3 rounded-full bg-green-500" style={{ boxShadow: '0 0 6px #10b981' }} />
+          <span>GPS activo (últimos 5 min)</span>
+        </div>
+        <div className="flex items-center space-x-2 text-yellow-400">
+          <div className="w-3 h-3 rounded-full bg-yellow-500" />
+          <span>Sin actualizar (+5 min)</span>
+        </div>
+        <div className="text-gray-600 pt-0.5">El Alto · 4,100 msnm</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── STAT CARD ────────────────────────────────────────────────────────────────
+function StatCard({ icon: Icon, label, value, sub, color = 'blue', pulse = false }) {
+  const colors = {
+    blue: 'border-blue-500 text-blue-400',
+    green: 'border-green-500 text-green-400',
+    yellow: 'border-yellow-500 text-yellow-400',
+    purple: 'border-purple-500 text-purple-400',
+  };
+  return (
+    <div className={`bg-gray-900 border-l-4 ${colors[color]} rounded-xl p-5 relative overflow-hidden`}>
+      <div className="flex justify-between items-start">
+        <div>
+          <p className="text-gray-500 text-xs font-mono uppercase tracking-widest mb-1">{label}</p>
+          <p className="text-3xl font-black text-white">{value}</p>
+          {sub && <p className="text-gray-500 text-xs mt-1">{sub}</p>}
+        </div>
+        <div className={`p-3 rounded-xl bg-gray-800 ${colors[color]}`}>
+          <Icon className="w-5 h-5" />
+        </div>
+      </div>
+      {pulse && (
+        <div className="absolute top-3 right-14">
+          <span className="flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function App() {
   const [token, setToken] = useState(localStorage.getItem('admin_token') || null);
   const [vistaActiva, setVistaActiva] = useState('dashboard');
   const urlServidor = import.meta.env.VITE_API_URL || 'http://127.0.0.1:3000';
 
-  // Estados del login
   const [usuario, setUsuario] = useState('');
   const [password, setPassword] = useState('');
   const [errorLogin, setErrorLogin] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
 
-  // Estados del dashboard
   const [viajes, setViajes] = useState([]);
   const [cargando, setCargando] = useState(false);
   const [errorDashboard, setErrorDashboard] = useState(null);
   const [filtroChofer, setFiltroChofer] = useState('');
 
-  // Estados del formulario de registro
+  const [choferes, setChoferes] = useState([]);
+  const [cargandoChoferes, setCargandoChoferes] = useState(false);
+
   const [formChofer, setFormChofer] = useState({ nombre: '', placa: '', password: '' });
   const [mensajeChofer, setMensajeChofer] = useState({ tipo: '', texto: '' });
   const [guardandoChofer, setGuardandoChofer] = useState(false);
 
-  // 🔥 NUEVOS: Estados para la tabla de choferes
-  const [choferes, setChoferes] = useState([]);
-  const [cargandoChoferes, setCargandoChoferes] = useState(false);
-  // Modal de reseteo de contraseña
-  const [modalReset, setModalReset] = useState(null); // { id, nombre }
+  const [modalReset, setModalReset] = useState(null);
   const [nuevaPassword, setNuevaPassword] = useState('');
   const [mensajeReset, setMensajeReset] = useState({ tipo: '', texto: '' });
   const [guardandoReset, setGuardandoReset] = useState(false);
 
-  // ==========================================
-  // AUTENTICACIÓN
-  // ==========================================
+  const [conexion, setConexion] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const on = () => setConexion(true);
+    const off = () => setConexion(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+  }, []);
+
+  // ── AUTH ──────────────────────────────────────────────────────────────────
   const iniciarSesion = async (e) => {
     e.preventDefault();
     setErrorLogin('');
+    setLoginLoading(true);
     try {
-      const respuesta = await axios.post(`${urlServidor}/api/admin/login`, { usuario, password });
-      const nuevoToken = respuesta.data.token;
-      localStorage.setItem('admin_token', nuevoToken);
-      setToken(nuevoToken);
+      const res = await axios.post(`${urlServidor}/api/admin/login`, { usuario, password });
+      localStorage.setItem('admin_token', res.data.token);
+      setToken(res.data.token);
     } catch {
-      setErrorLogin('Credenciales incorrectas. Intenta de nuevo.');
+      setErrorLogin('Credenciales incorrectas.');
+    } finally {
+      setLoginLoading(false);
     }
   };
 
@@ -54,205 +250,219 @@ function App() {
     setViajes([]);
     setChoferes([]);
     setVistaActiva('dashboard');
-    setFiltroChofer('');
   };
 
-  // ==========================================
-  // DASHBOARD
-  // ==========================================
-  const cargarReporte = async () => {
+  const headers = useCallback(() => ({ Authorization: `Bearer ${token}` }), [token]);
+
+  // ── DATA ──────────────────────────────────────────────────────────────────
+  const cargarReporte = useCallback(async () => {
     if (!token) return;
-    setCargando(true);
-    setErrorDashboard(null);
+    setCargando(true); setErrorDashboard(null);
     try {
-      const respuesta = await axios.get(`${urlServidor}/api/admin/viajes`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setViajes(respuesta.data);
+      const res = await axios.get(`${urlServidor}/api/admin/viajes`, { headers: headers() });
+      setViajes(res.data);
     } catch (err) {
       if (err.response?.status === 401 || err.response?.status === 403) cerrarSesion();
       else setErrorDashboard('⚠️ Error conectando al servidor.');
-    } finally {
-      setCargando(false);
-    }
-  };
+    } finally { setCargando(false); }
+  }, [token, urlServidor, headers]);
 
-  useEffect(() => {
-    if (token && vistaActiva === 'dashboard') cargarReporte();
-    if (token && vistaActiva === 'conductores') cargarChoferes();
-  }, [token, vistaActiva]);
-
-  // ==========================================
-  // 🔥 CHOFERES
-  // ==========================================
-  const cargarChoferes = async () => {
+  const cargarChoferes = useCallback(async () => {
     setCargandoChoferes(true);
     try {
-      const respuesta = await axios.get(`${urlServidor}/api/admin/choferes`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setChoferes(respuesta.data);
-    } catch (err) {
-      console.error('Error cargando choferes:', err);
-    } finally {
-      setCargandoChoferes(false);
-    }
-  };
+      const res = await axios.get(`${urlServidor}/api/admin/choferes`, { headers: headers() });
+      setChoferes(res.data);
+    } catch { /* silent */ } finally { setCargandoChoferes(false); }
+  }, [token, urlServidor, headers]);
 
+  useEffect(() => {
+    if (!token) return;
+    cargarReporte();
+    cargarChoferes();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    if (vistaActiva === 'dashboard') cargarReporte();
+    if (vistaActiva === 'conductores') { cargarReporte(); cargarChoferes(); }
+    if (vistaActiva === 'mapa') { cargarReporte(); cargarChoferes(); }
+  }, [vistaActiva]);
+
+  // Auto-refresh cada 15s en el radar
+  useEffect(() => {
+    if (vistaActiva !== 'mapa' || !token) return;
+    const iv = setInterval(() => { cargarChoferes(); }, 15000);
+    return () => clearInterval(iv);
+  }, [vistaActiva, token, cargarChoferes]);
+
+  // ── CONDUCTORES ───────────────────────────────────────────────────────────
   const registrarNuevoChofer = async (e) => {
     e.preventDefault();
-    setGuardandoChofer(true);
-    setMensajeChofer({ tipo: '', texto: '' });
+    setGuardandoChofer(true); setMensajeChofer({ tipo: '', texto: '' });
     try {
-      const respuesta = await axios.post(`${urlServidor}/api/admin/choferes`, {
+      const res = await axios.post(`${urlServidor}/api/admin/choferes`, {
         nombre_completo: formChofer.nombre,
         placa_vehiculo: formChofer.placa,
         password: formChofer.password
-      }, { headers: { Authorization: `Bearer ${token}` } });
-
-      setMensajeChofer({ tipo: 'exito', texto: respuesta.data.mensaje });
+      }, { headers: headers() });
+      setMensajeChofer({ tipo: 'exito', texto: res.data.mensaje });
       setFormChofer({ nombre: '', placa: '', password: '' });
-      cargarChoferes(); // Recargamos la tabla
+      cargarChoferes();
       setTimeout(() => setMensajeChofer({ tipo: '', texto: '' }), 4000);
     } catch (err) {
-      setMensajeChofer({ tipo: 'error', texto: err.response?.data?.error || 'Ocurrió un error al registrar el chofer.' });
-    } finally {
-      setGuardandoChofer(false);
-    }
+      setMensajeChofer({ tipo: 'error', texto: err.response?.data?.error || 'Error al registrar.' });
+    } finally { setGuardandoChofer(false); }
   };
 
   const toggleEstadoChofer = async (chofer) => {
     try {
-      await axios.patch(
-        `${urlServidor}/api/admin/choferes/${chofer.id}/estado`,
-        { estado_activo: !chofer.estado_activo },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      await axios.patch(`${urlServidor}/api/admin/choferes/${chofer.id}/estado`,
+        { estado_activo: !chofer.estado_activo }, { headers: headers() });
       cargarChoferes();
-    } catch (err) {
-      console.error('Error cambiando estado:', err);
-    }
-  };
-
-  const abrirModalReset = (chofer) => {
-    setModalReset({ id: chofer.id, nombre: chofer.nombre_completo });
-    setNuevaPassword('');
-    setMensajeReset({ tipo: '', texto: '' });
-  };
-
-  const cerrarModalReset = () => {
-    setModalReset(null);
-    setNuevaPassword('');
-    setMensajeReset({ tipo: '', texto: '' });
+    } catch { /* silent */ }
   };
 
   const resetearPassword = async (e) => {
     e.preventDefault();
-    setGuardandoReset(true);
-    setMensajeReset({ tipo: '', texto: '' });
+    setGuardandoReset(true); setMensajeReset({ tipo: '', texto: '' });
     try {
-      const respuesta = await axios.patch(
-        `${urlServidor}/api/admin/choferes/${modalReset.id}/password`,
-        { nueva_password: nuevaPassword },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      setMensajeReset({ tipo: 'exito', texto: respuesta.data.mensaje });
-      setTimeout(() => cerrarModalReset(), 2000);
+      const res = await axios.patch(`${urlServidor}/api/admin/choferes/${modalReset.id}/password`,
+        { nueva_password: nuevaPassword }, { headers: headers() });
+      setMensajeReset({ tipo: 'exito', texto: res.data.mensaje });
+      setTimeout(() => { setModalReset(null); setNuevaPassword(''); setMensajeReset({ tipo: '', texto: '' }); }, 2000);
     } catch (err) {
-      setMensajeReset({ tipo: 'error', texto: err.response?.data?.error || 'Error al actualizar la contraseña.' });
-    } finally {
-      setGuardandoReset(false);
-    }
+      setMensajeReset({ tipo: 'error', texto: err.response?.data?.error || 'Error.' });
+    } finally { setGuardandoReset(false); }
   };
 
-  // ==========================================
-  // FILTRADO Y TOTALES
-  // ==========================================
+  // ── COMPUTED ──────────────────────────────────────────────────────────────
   const viajesFiltrados = viajes.filter(v =>
-    v.chofer.toLowerCase().includes(filtroChofer.toLowerCase()) ||
-    v.placa_vehiculo.toLowerCase().includes(filtroChofer.toLowerCase())
+    v.chofer?.toLowerCase().includes(filtroChofer.toLowerCase()) ||
+    v.placa_vehiculo?.toLowerCase().includes(filtroChofer.toLowerCase())
   );
-  const totalRecaudado = viajesFiltrados.reduce((acc, viaje) => acc + parseFloat(viaje.tarifa_total), 0);
+  const totalRecaudado = viajesFiltrados.reduce((s, v) => s + parseFloat(v.tarifa_total || 0), 0);
+  const kmTotal = viajesFiltrados.reduce((s, v) => s + parseFloat(v.distancia_km || 0), 0);
+  const activosCount = choferes.filter(c => c.estado_activo).length;
+  // Conductores con GPS activo (actualizado hace menos de 5 minutos)
+  const conGPSVivo = choferes.filter(c => {
+    if (!c.estado_activo || !c.ultima_actualizacion) return false;
+    return (new Date() - new Date(c.ultima_actualizacion)) < 5 * 60 * 1000;
+  }).length;
 
-  // ==========================================
-  // PANTALLA: LOGIN
-  // ==========================================
+  // ── LOGIN ─────────────────────────────────────────────────────────────────
   if (!token) {
     return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4 font-sans">
-        <div className="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md border-t-8 border-blue-800">
-          <div className="text-center mb-8">
-            <Car className="w-16 h-16 text-blue-800 mx-auto mb-2" />
-            <h1 className="text-2xl font-black text-gray-800 tracking-wider">PULPOS <span className="font-light text-blue-600">ADMIN</span></h1>
-            <p className="text-gray-500 text-sm mt-1">Portal Exclusivo de Gerencia</p>
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap');
+          body { background: #030712; }
+          .font-radar { font-family: 'Share Tech Mono', monospace; }
+          .font-display { font-family: 'Rajdhani', sans-serif; }
+        `}</style>
+        <div className="w-full max-w-md">
+          <div className="text-center mb-10">
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full border-2 border-green-500 mb-4 relative"
+              style={{ boxShadow: '0 0 30px #10b98140' }}>
+              <Radio className="w-9 h-9 text-green-400" />
+              <span className="absolute top-0 right-0 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500" />
+              </span>
+            </div>
+            <h1 className="font-display text-4xl font-bold text-white tracking-widest">PULPOS</h1>
+            <p className="font-radar text-green-500 text-xs tracking-[0.4em] mt-1">CENTRAL DE OPERACIONES</p>
+            <p className="text-gray-600 text-xs mt-2 font-radar">El Alto · Bolivia · 4,100 msnm</p>
           </div>
-          <form onSubmit={iniciarSesion} className="space-y-6">
-            {errorLogin && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm font-semibold text-center border border-red-200">{errorLogin}</div>}
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-2">Usuario</label>
-              <div className="relative">
-                <User className="w-5 h-5 absolute left-3 top-3 text-gray-400" />
-                <input type="text" className="w-full bg-gray-50 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-800 outline-none" placeholder="admin" value={usuario} onChange={(e) => setUsuario(e.target.value)} />
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8"
+            style={{ boxShadow: '0 0 60px #10b98108' }}>
+            {errorLogin && (
+              <div className="flex items-center space-x-2 bg-red-950 border border-red-800 text-red-400 p-3 rounded-lg mb-6 font-radar text-sm">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{errorLogin}</span>
               </div>
-            </div>
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-2">Contraseña</label>
-              <div className="relative">
-                <Lock className="w-5 h-5 absolute left-3 top-3 text-gray-400" />
-                <input type="password" className="w-full bg-gray-50 pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-800 outline-none" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
+            )}
+            <form onSubmit={iniciarSesion} className="space-y-5">
+              <div>
+                <label className="font-radar text-xs text-gray-500 tracking-widest block mb-2">USUARIO</label>
+                <div className="relative">
+                  <User className="w-4 h-4 absolute left-4 top-3.5 text-gray-600" />
+                  <input type="text" value={usuario} onChange={e => setUsuario(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 text-white pl-11 pr-4 py-3 rounded-xl font-radar text-sm focus:outline-none focus:border-green-500 transition placeholder-gray-700"
+                    placeholder="admin" />
+                </div>
               </div>
-            </div>
-            <button type="submit" className="w-full bg-blue-800 text-white font-bold py-3 rounded-lg hover:bg-blue-900 transition shadow-lg">INGRESAR AL SISTEMA</button>
-          </form>
+              <div>
+                <label className="font-radar text-xs text-gray-500 tracking-widest block mb-2">CONTRASEÑA</label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 absolute left-4 top-3.5 text-gray-600" />
+                  <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 text-white pl-11 pr-4 py-3 rounded-xl font-radar text-sm focus:outline-none focus:border-green-500 transition placeholder-gray-700"
+                    placeholder="••••••••" />
+                </div>
+              </div>
+              <button type="submit" disabled={loginLoading}
+                className="w-full bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white font-display font-bold py-3.5 rounded-xl transition tracking-widest text-sm flex items-center justify-center space-x-2"
+                style={{ boxShadow: loginLoading ? 'none' : '0 0 20px #10b98140' }}>
+                {loginLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
+                <span>{loginLoading ? 'VERIFICANDO...' : 'ACCEDER AL SISTEMA'}</span>
+              </button>
+            </form>
+          </div>
         </div>
       </div>
     );
   }
 
-  // ==========================================
-  // PANTALLA PRINCIPAL
-  // ==========================================
+  // ── MAIN ──────────────────────────────────────────────────────────────────
+  const navItems = [
+    { id: 'dashboard', icon: LayoutDashboard, label: 'TABLERO' },
+    { id: 'mapa', icon: Map, label: 'RADAR' },
+    { id: 'conductores', icon: Users, label: 'FLOTA' },
+  ];
+
   return (
-    <div className="min-h-screen bg-gray-100 font-sans text-gray-800 flex flex-col">
+    <div className="min-h-screen bg-gray-950 text-gray-100" style={{ fontFamily: "'Rajdhani', sans-serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap');
+        .font-radar { font-family: 'Share Tech Mono', monospace; }
+        body { background: #030712; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #111; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+      `}</style>
 
-      {/* MODAL RESETEAR CONTRASEÑA */}
+      {/* MODAL RESET */}
       {modalReset && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-            <div className="flex items-center space-x-3 mb-5">
-              <div className="bg-yellow-100 p-2 rounded-lg">
-                <KeyRound className="w-6 h-6 text-yellow-600" />
-              </div>
+        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4"
+          onClick={() => setModalReset(null)}>
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-md p-6"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-start mb-5">
               <div>
-                <h3 className="font-bold text-gray-800 text-lg">Resetear Contraseña</h3>
-                <p className="text-sm text-gray-500">{modalReset.nombre}</p>
+                <h3 className="font-bold text-white text-lg">Resetear Contraseña</h3>
+                <p className="text-yellow-500 font-radar text-sm">{modalReset.nombre}</p>
               </div>
+              <button onClick={() => setModalReset(null)} className="text-gray-600 hover:text-white transition">
+                <X className="w-5 h-5" />
+              </button>
             </div>
-
             {mensajeReset.texto && (
-              <div className={`mb-4 p-3 rounded-lg text-sm font-semibold ${mensajeReset.tipo === 'exito' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+              <div className={`mb-4 p-3 rounded-lg text-sm font-radar ${mensajeReset.tipo === 'exito' ? 'bg-green-950 text-green-400 border border-green-800' : 'bg-red-950 text-red-400 border border-red-800'}`}>
                 {mensajeReset.texto}
               </div>
             )}
-
             <form onSubmit={resetearPassword} className="space-y-4">
-              <div>
-                <label className="block text-sm font-bold text-gray-700 mb-1">Nueva Contraseña</label>
-                <input
-                  type="password"
-                  required
-                  minLength={4}
-                  className="w-full bg-gray-50 px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-yellow-400 outline-none"
-                  placeholder="Mínimo 4 caracteres"
-                  value={nuevaPassword}
-                  onChange={(e) => setNuevaPassword(e.target.value)}
-                />
-              </div>
-              <div className="flex justify-end space-x-3 pt-2">
-                <button type="button" onClick={cerrarModalReset} className="px-4 py-2 rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50 font-semibold transition">
+              <input type="password" required minLength={4}
+                className="w-full bg-gray-800 border border-gray-700 text-white px-4 py-3 rounded-xl font-radar text-sm focus:outline-none focus:border-yellow-500 transition placeholder-gray-700"
+                placeholder="Nueva contraseña (mín. 4 caracteres)"
+                value={nuevaPassword} onChange={e => setNuevaPassword(e.target.value)} />
+              <div className="flex justify-end space-x-3">
+                <button type="button" onClick={() => setModalReset(null)}
+                  className="px-4 py-2 border border-gray-700 text-gray-400 hover:text-white rounded-lg transition text-sm font-semibold">
                   Cancelar
                 </button>
-                <button type="submit" disabled={guardandoReset} className="px-4 py-2 rounded-lg bg-yellow-500 hover:bg-yellow-600 text-white font-bold transition disabled:opacity-60 flex items-center space-x-2">
+                <button type="submit" disabled={guardandoReset}
+                  className="px-5 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg font-bold transition text-sm flex items-center space-x-2 disabled:opacity-60">
                   {guardandoReset ? <RefreshCw className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
                   <span>{guardandoReset ? 'Guardando...' : 'Actualizar'}</span>
                 </button>
@@ -263,97 +473,102 @@ function App() {
       )}
 
       {/* NAVBAR */}
-      <nav className="bg-blue-900 text-white shadow-lg">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+      <nav className="bg-gray-900 border-b border-gray-800 sticky top-0 z-40">
+        <div className="max-w-screen-2xl mx-auto px-4 lg:px-8 py-3 flex justify-between items-center">
           <div className="flex items-center space-x-3">
-            <Car className="w-8 h-8 text-green-400" />
-            <h1 className="text-2xl font-bold tracking-wider">PULPOS <span className="font-light text-blue-300">ADMIN</span></h1>
+            <div className="relative">
+              <Radio className="w-7 h-7 text-green-400" />
+              <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+              </span>
+            </div>
+            <div>
+              <span className="text-white font-bold text-xl tracking-widest">PULPOS</span>
+              <span className="text-green-500 font-bold text-xl tracking-widest"> ADMIN</span>
+            </div>
           </div>
-          <div className="flex items-center space-x-6">
-            <div className="hidden md:flex space-x-2 bg-blue-800 p-1 rounded-lg">
-              <button onClick={() => setVistaActiva('dashboard')} className={`flex items-center space-x-2 px-4 py-2 rounded-md text-sm font-bold transition ${vistaActiva === 'dashboard' ? 'bg-white text-blue-900 shadow' : 'text-blue-100 hover:text-white'}`}>
-                <LayoutDashboard className="w-4 h-4" /><span>Tablero</span>
+          <div className="flex items-center space-x-1 bg-gray-800 p-1 rounded-xl">
+            {navItems.map(item => (
+              <button key={item.id} onClick={() => setVistaActiva(item.id)}
+                className={`flex items-center space-x-2 px-4 py-2 rounded-lg text-xs font-bold tracking-widest transition ${vistaActiva === item.id ? 'bg-gray-700 text-white shadow' : 'text-gray-500 hover:text-gray-300'}`}>
+                <item.icon className="w-4 h-4" />
+                <span className="hidden md:inline">{item.label}</span>
               </button>
-              <button onClick={() => setVistaActiva('conductores')} className={`flex items-center space-x-2 px-4 py-2 rounded-md text-sm font-bold transition ${vistaActiva === 'conductores' ? 'bg-white text-blue-900 shadow' : 'text-blue-100 hover:text-white'}`}>
-                <Users className="w-4 h-4" /><span>Conductores</span>
-              </button>
+            ))}
+          </div>
+          <div className="flex items-center space-x-4">
+            <div className="hidden md:flex items-center space-x-2">
+              {conexion ? <Wifi className="w-4 h-4 text-green-500" /> : <WifiOff className="w-4 h-4 text-red-500" />}
+              <span className="font-radar text-xs text-gray-500">{conexion ? 'EN LÍNEA' : 'SIN SEÑAL'}</span>
             </div>
-            <div className="flex items-center space-x-4 border-l border-blue-700 pl-4">
-              <span className="text-sm font-semibold text-blue-200">Gerencia</span>
-              <button onClick={cerrarSesion} className="text-white hover:text-red-400 text-sm font-bold underline transition">Salir</button>
-            </div>
+            <button onClick={cerrarSesion}
+              className="font-radar text-xs text-gray-600 hover:text-red-400 transition uppercase tracking-widest">
+              SALIR
+            </button>
           </div>
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto px-4 py-8 flex-1 w-full">
+      <main className="max-w-screen-2xl mx-auto px-4 lg:px-8 py-6">
 
-        {/* VISTA: TABLERO */}
+        {/* ── DASHBOARD ── */}
         {vistaActiva === 'dashboard' && (
-          <div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-              <div className="bg-white rounded-xl shadow-sm p-6 border-l-4 border-blue-500">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="text-gray-500 text-sm font-bold mb-1">RECAUDACIÓN FILTRADA</h3>
-                    <p className="text-3xl font-black text-gray-800">Bs {totalRecaudado.toFixed(2)}</p>
-                  </div>
-                  <DollarSign className="text-blue-500 opacity-50 w-8 h-8" />
-                </div>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm p-6 border-l-4 border-green-500">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h3 className="text-gray-500 text-sm font-bold mb-1">VIAJES EN PANTALLA</h3>
-                    <p className="text-3xl font-black text-gray-800">{viajesFiltrados.length}</p>
-                  </div>
-                  <Activity className="text-green-500 opacity-50 w-8 h-8" />
-                </div>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm p-6 border-l-4 border-purple-500 flex flex-col justify-center">
-                <h3 className="text-gray-500 text-sm font-bold mb-1">ALGORITMO TOPOGRÁFICO</h3>
-                <p className="text-lg font-bold text-green-600 flex items-center gap-2">
-                  <span className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span>SISTEMA EN LÍNEA
-                </p>
-              </div>
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <StatCard icon={DollarSign} label="RECAUDACIÓN" value={`Bs ${totalRecaudado.toFixed(2)}`} sub="viajes filtrados" color="green" />
+              <StatCard icon={Activity} label="VIAJES" value={viajesFiltrados.length} sub={`de ${viajes.length} total`} color="blue" />
+              <StatCard icon={Car} label="FLOTA ACTIVA" value={activosCount} sub={`${conGPSVivo} con GPS en vivo`} color="yellow" pulse />
+              <StatCard icon={TrendingUp} label="KM RECORRIDOS" value={kmTotal.toFixed(1)} sub="kilómetros acumulados" color="purple" />
             </div>
-
-            <div className="bg-white rounded-xl shadow-md overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-200 flex flex-col md:flex-row md:justify-between md:items-center bg-gray-50 gap-4">
-                <h2 className="text-lg font-bold text-gray-700">Flujo de Viajes</h2>
-                <div className="relative w-full md:w-72">
-                  <Search className="w-5 h-5 absolute left-3 top-2.5 text-gray-400" />
-                  <input type="text" placeholder="Buscar chofer o placa..." className="w-full pl-10 pr-4 py-2 rounded-lg border border-gray-300 outline-none focus:ring-2 focus:ring-blue-500 text-sm transition" value={filtroChofer} onChange={(e) => setFiltroChofer(e.target.value)} />
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center space-x-2">
+                  <Clock className="w-4 h-4 text-gray-500" />
+                  <h2 className="font-bold text-gray-200 tracking-wider">HISTORIAL DE VIAJES</h2>
                 </div>
-                <button onClick={cargarReporte} disabled={cargando} className="flex items-center justify-center gap-2 bg-blue-100 text-blue-700 px-4 py-2 rounded-lg hover:bg-blue-200 transition font-bold text-sm disabled:opacity-50 whitespace-nowrap">
-                  <RefreshCw className={`w-4 h-4 ${cargando ? 'animate-spin' : ''}`} />
-                  {cargando ? 'Actualizando...' : 'Sincronizar'}
-                </button>
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-600" />
+                    <input type="text" placeholder="Buscar conductor o placa..."
+                      className="bg-gray-800 border border-gray-700 text-white pl-9 pr-4 py-2 rounded-lg font-radar text-xs focus:outline-none focus:border-blue-500 transition w-56 placeholder-gray-700"
+                      value={filtroChofer} onChange={e => setFiltroChofer(e.target.value)} />
+                  </div>
+                  <button onClick={cargarReporte} disabled={cargando}
+                    className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 px-4 py-2 rounded-lg transition font-radar text-xs disabled:opacity-50">
+                    <RefreshCw className={`w-3.5 h-3.5 ${cargando ? 'animate-spin' : ''}`} />
+                    SYNC
+                  </button>
+                </div>
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
+                <table className="w-full">
                   <thead>
-                    <tr className="bg-gray-100 text-gray-600 text-sm uppercase tracking-wider">
-                      <th className="px-6 py-4 font-semibold">Conductor / Unidad</th>
-                      <th className="px-6 py-4 font-semibold">Distancia</th>
-                      <th className="px-6 py-4 font-semibold">Tiempo Espera</th>
-                      <th className="px-6 py-4 font-semibold text-right">Tarifa Calculada</th>
-                      <th className="px-6 py-4 font-semibold">Registro</th>
+                    <tr className="border-b border-gray-800">
+                      {['CONDUCTOR / UNIDAD', 'DISTANCIA', 'ESPERA', 'TARIFA', 'FECHA'].map(h => (
+                        <th key={h} className="px-5 py-3 text-left font-radar text-xs text-gray-600 tracking-widest">{h}</th>
+                      ))}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {errorDashboard && <tr><td colSpan="5" className="text-center py-8 text-red-500 font-bold">{errorDashboard}</td></tr>}
-                    {!errorDashboard && viajesFiltrados.length === 0 && !cargando && <tr><td colSpan="5" className="text-center py-8 text-gray-500">No se encontraron viajes para esta búsqueda.</td></tr>}
-                    {viajesFiltrados.map((viaje) => (
-                      <tr key={viaje.id} className="hover:bg-gray-50 transition">
-                        <td className="px-6 py-4">
-                          <div className="font-bold text-gray-800">{viaje.chofer}</div>
-                          <div className="text-xs text-gray-500">{viaje.placa_vehiculo}</div>
+                  <tbody>
+                    {errorDashboard && (
+                      <tr><td colSpan={5} className="text-center py-10 text-red-500 font-radar text-sm">{errorDashboard}</td></tr>
+                    )}
+                    {!errorDashboard && viajesFiltrados.length === 0 && !cargando && (
+                      <tr><td colSpan={5} className="text-center py-10 text-gray-700 font-radar text-sm">SIN REGISTROS</td></tr>
+                    )}
+                    {viajesFiltrados.map(viaje => (
+                      <tr key={viaje.id} className="border-b border-gray-800 hover:bg-gray-800 transition">
+                        <td className="px-5 py-4">
+                          <div className="font-semibold text-white">{viaje.chofer}</div>
+                          <div className="font-radar text-xs text-green-500 mt-0.5">{viaje.placa_vehiculo}</div>
                         </td>
-                        <td className="px-6 py-4 font-medium text-blue-600">{parseFloat(viaje.distancia_km).toFixed(2)} km</td>
-                        <td className="px-6 py-4 text-orange-500 font-medium">{Math.floor(viaje.tiempo_detencion_min)} min</td>
-                        <td className="px-6 py-4 text-right font-black text-green-700 text-lg">Bs {parseFloat(viaje.tarifa_total).toFixed(2)}</td>
-                        <td className="px-6 py-4 text-sm text-gray-500">{new Date(viaje.fecha_hora).toLocaleString('es-BO')}</td>
+                        <td className="px-5 py-4 font-radar text-blue-400">{parseFloat(viaje.distancia_km).toFixed(2)} km</td>
+                        <td className="px-5 py-4 font-radar text-yellow-500">{Math.floor(viaje.tiempo_detencion_min)} min</td>
+                        <td className="px-5 py-4 font-radar text-green-400 font-bold text-base">Bs {parseFloat(viaje.tarifa_total).toFixed(2)}</td>
+                        <td className="px-5 py-4 font-radar text-xs text-gray-600">
+                          {new Date(viaje.fecha_hora).toLocaleString('es-BO', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -363,136 +578,258 @@ function App() {
           </div>
         )}
 
-        {/* VISTA: CONDUCTORES */}
-        {vistaActiva === 'conductores' && (
-          <div className="space-y-8">
+        {/* ── MAPA (RADAR) ── */}
+        {vistaActiva === 'mapa' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-bold text-white text-2xl tracking-wider flex items-center space-x-2">
+                  <Map className="w-6 h-6 text-green-400" />
+                  <span>RADAR DE FLOTA · GPS EN VIVO</span>
+                </h2>
+                <p className="font-radar text-xs text-gray-600 mt-1">
+                  Actualización automática cada 15s ·&nbsp;
+                  <span className="text-green-400">{conGPSVivo} unidades con señal GPS activa</span>
+                </p>
+              </div>
+              <button onClick={() => { cargarChoferes(); cargarReporte(); }}
+                className="flex items-center gap-2 bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg transition font-radar text-xs font-bold">
+                <RefreshCw className={`w-3.5 h-3.5 ${cargandoChoferes ? 'animate-spin' : ''}`} />
+                ACTUALIZAR
+              </button>
+            </div>
 
-            {/* FORMULARIO REGISTRO */}
-            <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200 max-w-2xl mx-auto">
-              <div className="px-6 py-5 border-b border-gray-200 bg-gray-50 flex items-center space-x-3">
-                <div className="bg-blue-100 p-2 rounded-lg">
-                  <UserPlus className="w-6 h-6 text-blue-700" />
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+              <div className="lg:col-span-3 bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden" style={{ height: '540px' }}>
+                <FleetMap choferes={choferes} viajes={viajes} />
+              </div>
+
+              <div className="space-y-3">
+                {/* Estado */}
+                <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                  <p className="font-radar text-xs text-gray-600 tracking-widest mb-3">ESTADO DE FLOTA</p>
+                  <div className="space-y-2">
+                    <div className="flex justify-between">
+                      <span className="text-gray-400 text-sm">GPS activo ahora</span>
+                      <span className="font-radar text-green-400 font-bold">{conGPSVivo}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400 text-sm">Activos sin GPS</span>
+                      <span className="font-radar text-yellow-500 font-bold">{activosCount - conGPSVivo}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400 text-sm">Inactivos</span>
+                      <span className="font-radar text-gray-600 font-bold">{choferes.length - activosCount}</span>
+                    </div>
+                    <div className="w-full bg-gray-800 rounded-full h-1.5 mt-2">
+                      <div className="bg-green-500 h-1.5 rounded-full transition-all"
+                        style={{ width: `${choferes.length ? (conGPSVivo / choferes.length * 100) : 0}%` }} />
+                    </div>
+                  </div>
                 </div>
+
+                {/* Lista de unidades */}
+                <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                  <div className="px-4 py-3 border-b border-gray-800">
+                    <p className="font-radar text-xs text-gray-600 tracking-widest">UNIDADES ACTIVAS</p>
+                  </div>
+                  <div className="divide-y divide-gray-800 max-h-72 overflow-y-auto">
+                    {choferes.filter(c => c.estado_activo).length === 0 && (
+                      <div className="py-6 text-center font-radar text-xs text-gray-700">SIN UNIDADES ACTIVAS</div>
+                    )}
+                    {choferes.filter(c => c.estado_activo).map(chofer => {
+                      const tieneGPS = chofer.ultima_lat != null;
+                      const ahora = new Date();
+                      const ultima = chofer.ultima_actualizacion ? new Date(chofer.ultima_actualizacion) : null;
+                      const minutos = ultima ? Math.floor((ahora - ultima) / 60000) : null;
+                      const enVivo = minutos !== null && minutos < 5;
+
+                      return (
+                        <div key={chofer.id} className="px-4 py-3 hover:bg-gray-800 transition">
+                          <div className="flex items-center space-x-2">
+                            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${enVivo ? 'bg-green-500' : tieneGPS ? 'bg-yellow-500' : 'bg-gray-600'}`}
+                              style={enVivo ? { boxShadow: '0 0 6px #10b981' } : {}} />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-white text-sm font-semibold truncate">{chofer.nombre_completo}</div>
+                              <div className="font-radar text-xs text-gray-600">
+                                {chofer.placa_vehiculo}&nbsp;·&nbsp;
+                                {enVivo ? <span className="text-green-500">GPS vivo</span>
+                                  : tieneGPS ? <span className="text-yellow-600">hace {minutos}min</span>
+                                  : <span className="text-gray-700">sin GPS aún</span>}
+                              </div>
+                            </div>
+                            {tieneGPS && <MapPin className="w-3 h-3 text-gray-700 flex-shrink-0" />}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Algoritmo */}
+                <div className="bg-gray-900 border border-green-900 rounded-xl p-4">
+                  <p className="font-radar text-xs text-green-700 tracking-widest mb-2">T = D·Cb·FH·FR + Ct·Td</p>
+                  <div className="space-y-1">
+                    {[
+                      ['FH Altitud (4,100m)', '1.40×'],
+                      ['FR Asfalto', '1.0×'],
+                      ['FR Tierra/Barro', '2.5×'],
+                      ['Cb base/km', 'Bs 2.00'],
+                      ['Ct detención/min', 'Bs 0.50'],
+                    ].map(([k, v]) => (
+                      <div key={k} className="flex justify-between">
+                        <span className="font-radar text-xs text-gray-600">{k}</span>
+                        <span className="font-radar text-xs text-green-400">{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── CONDUCTORES ── */}
+        {vistaActiva === 'conductores' && (
+          <div className="space-y-6">
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden max-w-2xl">
+              <div className="px-6 py-4 border-b border-gray-800 flex items-center space-x-3">
+                <UserPlus className="w-5 h-5 text-blue-400" />
                 <div>
-                  <h2 className="text-lg font-bold text-gray-800">Registrar Nuevo Conductor</h2>
-                  <p className="text-sm text-gray-500">Añade credenciales de acceso para la aplicación móvil.</p>
+                  <h2 className="font-bold text-white tracking-wider">REGISTRAR CONDUCTOR</h2>
+                  <p className="text-gray-600 text-xs font-radar">Credenciales para la app móvil</p>
                 </div>
               </div>
               <div className="p-6">
                 {mensajeChofer.texto && (
-                  <div className={`mb-6 p-4 rounded-lg ${mensajeChofer.tipo === 'exito' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
-                    <div className="font-bold text-sm">{mensajeChofer.texto}</div>
+                  <div className={`mb-5 p-4 rounded-xl font-radar text-sm border ${mensajeChofer.tipo === 'exito' ? 'bg-green-950 text-green-400 border-green-800' : 'bg-red-950 text-red-400 border-red-800'}`}>
+                    {mensajeChofer.texto}
                   </div>
                 )}
-                <form onSubmit={registrarNuevoChofer} className="space-y-5">
+                <form onSubmit={registrarNuevoChofer} className="space-y-4">
                   <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Nombre Completo</label>
-                    <input type="text" required className="w-full bg-gray-50 px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="Ej. Juan Pérez" value={formChofer.nombre} onChange={(e) => setFormChofer({...formChofer, nombre: e.target.value})} />
+                    <label className="font-radar text-xs text-gray-600 tracking-widest block mb-2">NOMBRE COMPLETO</label>
+                    <input type="text" required
+                      className="w-full bg-gray-800 border border-gray-700 text-white px-4 py-2.5 rounded-xl font-radar text-sm focus:outline-none focus:border-blue-500 transition placeholder-gray-700"
+                      placeholder="Ej. Juan Pérez Mamani"
+                      value={formChofer.nombre} onChange={e => setFormChofer({ ...formChofer, nombre: e.target.value })} />
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">Placa Vehicular</label>
-                      <input type="text" required className="w-full bg-gray-50 px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 outline-none transition uppercase" placeholder="1234-XYZ" value={formChofer.placa} onChange={(e) => setFormChofer({...formChofer, placa: e.target.value.toUpperCase()})} />
+                      <label className="font-radar text-xs text-gray-600 tracking-widest block mb-2">PLACA</label>
+                      <input type="text" required
+                        className="w-full bg-gray-800 border border-gray-700 text-white px-4 py-2.5 rounded-xl font-radar text-sm focus:outline-none focus:border-blue-500 transition placeholder-gray-700 uppercase"
+                        placeholder="1234-XYZ"
+                        value={formChofer.placa} onChange={e => setFormChofer({ ...formChofer, placa: e.target.value.toUpperCase() })} />
                     </div>
                     <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">Contraseña de Acceso</label>
-                      <input type="password" required className="w-full bg-gray-50 px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 outline-none transition" placeholder="••••••••" value={formChofer.password} onChange={(e) => setFormChofer({...formChofer, password: e.target.value})} />
+                      <label className="font-radar text-xs text-gray-600 tracking-widest block mb-2">CONTRASEÑA</label>
+                      <input type="password" required
+                        className="w-full bg-gray-800 border border-gray-700 text-white px-4 py-2.5 rounded-xl font-radar text-sm focus:outline-none focus:border-blue-500 transition placeholder-gray-700"
+                        placeholder="••••••••"
+                        value={formChofer.password} onChange={e => setFormChofer({ ...formChofer, password: e.target.value })} />
                     </div>
                   </div>
-                  <div className="pt-4 mt-6 border-t border-gray-100 flex justify-end">
-                    <button type="submit" disabled={guardandoChofer} className="bg-blue-700 text-white font-bold px-6 py-2 rounded-lg hover:bg-blue-800 transition shadow-md disabled:opacity-70 flex items-center space-x-2">
-                      {guardandoChofer ? <><RefreshCw className="w-4 h-4 animate-spin" /><span>Guardando...</span></> : <span>Crear Credencial</span>}
+                  <div className="flex justify-end pt-2">
+                    <button type="submit" disabled={guardandoChofer}
+                      className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold px-6 py-2.5 rounded-xl transition tracking-wider text-sm">
+                      {guardandoChofer ? <RefreshCw className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
+                      <span>{guardandoChofer ? 'GUARDANDO...' : 'CREAR CREDENCIAL'}</span>
                     </button>
                   </div>
                 </form>
               </div>
             </div>
 
-            {/* 🔥 TABLA DE CONDUCTORES REGISTRADOS */}
-            <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
-              <div className="px-6 py-5 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
                 <div className="flex items-center space-x-3">
-                  <div className="bg-purple-100 p-2 rounded-lg">
-                    <Users className="w-6 h-6 text-purple-700" />
-                  </div>
+                  <Users className="w-5 h-5 text-purple-400" />
                   <div>
-                    <h2 className="text-lg font-bold text-gray-800">Conductores Registrados</h2>
-                    <p className="text-sm text-gray-500">{choferes.length} conductor{choferes.length !== 1 ? 'es' : ''} en el sistema</p>
+                    <h2 className="font-bold text-white tracking-wider">CONDUCTORES REGISTRADOS</h2>
+                    <p className="font-radar text-xs text-gray-600">{choferes.length} conductor{choferes.length !== 1 ? 'es' : ''}</p>
                   </div>
                 </div>
-                <button onClick={cargarChoferes} disabled={cargandoChoferes} className="flex items-center gap-2 bg-purple-100 text-purple-700 px-3 py-2 rounded-lg hover:bg-purple-200 transition font-bold text-sm disabled:opacity-50">
-                  <RefreshCw className={`w-4 h-4 ${cargandoChoferes ? 'animate-spin' : ''}`} />
-                  Actualizar
+                <button onClick={cargarChoferes} disabled={cargandoChoferes}
+                  className="flex items-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 px-3 py-2 rounded-lg transition font-radar text-xs">
+                  <RefreshCw className={`w-3.5 h-3.5 ${cargandoChoferes ? 'animate-spin' : ''}`} />
+                  RECARGAR
                 </button>
               </div>
-
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
+                <table className="w-full">
                   <thead>
-                    <tr className="bg-gray-100 text-gray-600 text-sm uppercase tracking-wider">
-                      <th className="px-6 py-4 font-semibold">ID</th>
-                      <th className="px-6 py-4 font-semibold">Nombre Completo</th>
-                      <th className="px-6 py-4 font-semibold">Placa</th>
-                      <th className="px-6 py-4 font-semibold">Contraseña</th>
-                      <th className="px-6 py-4 font-semibold text-center">Estado</th>
-                      <th className="px-6 py-4 font-semibold text-center">Acciones</th>
+                    <tr className="border-b border-gray-800">
+                      {['ID', 'NOMBRE', 'PLACA', 'ÚLTIMA POSICIÓN', 'ESTADO', 'ACCIONES'].map(h => (
+                        <th key={h} className="px-5 py-3 text-left font-radar text-xs text-gray-600 tracking-widest">{h}</th>
+                      ))}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
+                  <tbody>
                     {cargandoChoferes && (
-                      <tr><td colSpan="6" className="text-center py-8 text-gray-400">Cargando conductores...</td></tr>
+                      <tr><td colSpan={6} className="text-center py-10 text-gray-700 font-radar text-sm">CARGANDO...</td></tr>
                     )}
                     {!cargandoChoferes && choferes.length === 0 && (
-                      <tr><td colSpan="6" className="text-center py-8 text-gray-400">No hay conductores registrados aún.</td></tr>
+                      <tr><td colSpan={6} className="text-center py-10 text-gray-700 font-radar text-sm">SIN CONDUCTORES</td></tr>
                     )}
-                    {choferes.map((chofer) => (
-                      <tr key={chofer.id} className={`hover:bg-gray-50 transition ${!chofer.estado_activo ? 'opacity-50' : ''}`}>
-                        <td className="px-6 py-4 text-gray-400 text-sm font-mono">#{chofer.id}</td>
-                        <td className="px-6 py-4 font-bold text-gray-800">{chofer.nombre_completo}</td>
-                        <td className="px-6 py-4">
-                          <span className="bg-blue-100 text-blue-800 font-mono font-bold px-3 py-1 rounded-full text-sm">{chofer.placa_vehiculo}</span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="text-gray-400 font-mono tracking-widest text-lg">••••••••</span>
-                        </td>
-                        <td className="px-6 py-4 text-center">
-                          {chofer.estado_activo ? (
-                            <span className="inline-flex items-center gap-1 bg-green-100 text-green-700 text-xs font-bold px-3 py-1 rounded-full">
-                              <ShieldCheck className="w-3 h-3" /> ACTIVO
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 bg-red-100 text-red-600 text-xs font-bold px-3 py-1 rounded-full">
-                              <ShieldOff className="w-3 h-3" /> INACTIVO
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center justify-center gap-2">
-                            {/* Botón resetear contraseña */}
-                            <button
-                              onClick={() => abrirModalReset(chofer)}
-                              title="Resetear contraseña"
-                              className="p-2 rounded-lg bg-yellow-100 text-yellow-700 hover:bg-yellow-200 transition"
-                            >
-                              <KeyRound className="w-4 h-4" />
-                            </button>
-                            {/* Botón activar/desactivar */}
-                            <button
-                              onClick={() => toggleEstadoChofer(chofer)}
-                              title={chofer.estado_activo ? 'Desactivar conductor' : 'Activar conductor'}
-                              className={`p-2 rounded-lg transition ${chofer.estado_activo ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-green-100 text-green-700 hover:bg-green-200'}`}
-                            >
-                              {chofer.estado_activo ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    {choferes.map(chofer => {
+                      const tieneGPS = chofer.ultima_lat != null;
+                      const ultima = chofer.ultima_actualizacion ? new Date(chofer.ultima_actualizacion) : null;
+                      const minutos = ultima ? Math.floor((new Date() - ultima) / 60000) : null;
+                      const enVivo = minutos !== null && minutos < 5;
+
+                      return (
+                        <tr key={chofer.id} className={`border-b border-gray-800 hover:bg-gray-800 transition ${!chofer.estado_activo ? 'opacity-40' : ''}`}>
+                          <td className="px-5 py-4 font-radar text-xs text-gray-600">#{chofer.id}</td>
+                          <td className="px-5 py-4 font-semibold text-white">{chofer.nombre_completo}</td>
+                          <td className="px-5 py-4">
+                            <span className="font-radar text-xs bg-blue-950 text-blue-400 border border-blue-800 px-2.5 py-1 rounded-lg">{chofer.placa_vehiculo}</span>
+                          </td>
+                          <td className="px-5 py-4 font-radar text-xs">
+                            {tieneGPS ? (
+                              <div>
+                                <div className={enVivo ? 'text-green-400' : 'text-yellow-600'}>
+                                  {parseFloat(chofer.ultima_lat).toFixed(5)}, {parseFloat(chofer.ultima_lng).toFixed(5)}
+                                </div>
+                                <div className="text-gray-700 mt-0.5">
+                                  {enVivo ? '🟢 hace ' + minutos + ' min' : '🟡 hace ' + minutos + ' min'}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-gray-700">Sin datos GPS</span>
+                            )}
+                          </td>
+                          <td className="px-5 py-4">
+                            {chofer.estado_activo ? (
+                              <span className="flex items-center space-x-1.5 font-radar text-xs text-green-400">
+                                <ShieldCheck className="w-3.5 h-3.5" /><span>ACTIVO</span>
+                              </span>
+                            ) : (
+                              <span className="flex items-center space-x-1.5 font-radar text-xs text-gray-600">
+                                <ShieldOff className="w-3.5 h-3.5" /><span>INACTIVO</span>
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-5 py-4">
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => { setModalReset({ id: chofer.id, nombre: chofer.nombre_completo }); setNuevaPassword(''); setMensajeReset({ tipo: '', texto: '' }); }}
+                                className="p-2 rounded-lg bg-yellow-950 text-yellow-500 hover:bg-yellow-900 border border-yellow-800 transition">
+                                <KeyRound className="w-3.5 h-3.5" />
+                              </button>
+                              <button onClick={() => toggleEstadoChofer(chofer)}
+                                className={`p-2 rounded-lg border transition ${chofer.estado_activo ? 'bg-red-950 text-red-500 hover:bg-red-900 border-red-800' : 'bg-green-950 text-green-500 hover:bg-green-900 border-green-800'}`}>
+                                {chofer.estado_activo ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             </div>
-
           </div>
         )}
       </main>
